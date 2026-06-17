@@ -1,0 +1,126 @@
+# pseudo_anonymize_config.toml
+#
+# Each [[patterns]] block defines one PII detector.
+# Patterns are applied in the order listed — earlier patterns win when spans overlap.
+#
+# ── Pattern fields ────────────────────────────────────────────────────────────
+#
+#   name            string    identifier used in stats and the mapping file
+#
+#   regex           string    Python regex (use single quotes to keep \b etc. literal)
+#                             Can be omitted when spacy_ner = true and no fallback needed.
+#
+#   spacy_ner       bool      use spaCy NER instead of regex (when model is loaded)
+#   spacy_labels    [string]  entity labels to match (default: ["PERSON"])
+#
+#   template        string    pseudonym to generate; supports:
+#                               {n}           sequential counter (format specs ok, e.g. {n:03d})
+#                               {orig}        the original matched text
+#                               {orig_len}    length of the original text
+#                             or the special keyword:
+#                               "preserve_length"   zero-pads {n} to the same width as original
+#
+#   exclusions      [string]  words that disqualify a regex match (case-sensitive)
+#   min_word_length int       minimum character length for every word in a match
+#   regex_flags     [string]  re module flag names, e.g. ["IGNORECASE"]
+#
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+[settings]
+# spaCy model used for name NER. Install with:
+#   pip install spacy && python -m spacy download en_core_web_sm
+spacy_model = "en_core_web_sm"
+
+
+# ── Patterns ──────────────────────────────────────────────────────────────────
+
+[[patterns]]
+name     = "email"
+regex    = '\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b'
+template = "person{n:03d}@anon.invalid"
+
+[[patterns]]
+name         = "name"
+spacy_ner    = true
+spacy_labels = ["PERSON"]
+# Heuristic fallback when spaCy model is unavailable:
+# 2–4 consecutive Title-Case words
+regex           = '\b[A-Z][a-z]{1,25}(?:\s+[A-Z][a-z]{1,25}){1,3}\b'
+template        = "Person{n:03d}"
+min_word_length = 2
+exclusions = [
+  # Months
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+  # Days
+  "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+  # Nationalities / languages / regions
+  "English", "French", "German", "Spanish", "Italian", "Dutch", "Swedish", "Welsh",
+  "British", "American", "European", "African", "Asian", "Australian", "Irish",
+  "North", "South", "East", "West", "Central", "Upper", "Lower", "Northern", "Southern",
+  "United", "States", "Kingdom", "Nations", "Republic",
+  # Document structure
+  "Figure", "Table", "Section", "Chapter", "Appendix", "Page", "Note", "Ref",
+  "Paragraph", "Part", "Item", "List", "Annex", "Schedule", "Exhibit",
+  # Common heading words
+  "True", "False", "None", "Null", "Error", "Warning", "Info", "Summary",
+  "Introduction", "Conclusion", "Overview", "Background", "Methodology",
+  "Results", "Discussion", "References", "Bibliography", "Abstract", "Contents",
+  # Technology / organisations
+  "Microsoft", "Google", "Apple", "Linux", "Windows", "Python", "Office",
+  "University", "College", "Institute", "Department", "Faculty", "School", "Team",
+  "Street", "Avenue", "Road", "Lane", "Drive", "Court", "Place",
+  # Calendar / academic terms
+  "Academic", "Calendar", "Semester", "Term", "Week", "Weeks", "Vacation", "Holidays",
+  "Holiday", "Bank", "Exam", "Exams", "Examination", "Examinations", "Period", "Periods",
+  "Welcome", "Christmas", "Easter", "Summer", "Autumn", "Spring", "Winter",
+  "Scheduling", "Timetable", "Session", "Sessions", "Registration", "Induction",
+  # Numbers as words
+  "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+  "First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth",
+  # Short tokens that slip through
+  "Wk", "Re", "Dr", "Mr", "Ms", "Mrs", "Prof",
+  # Generic heading / column header words (also prevents spaCy tagging these as PERSON)
+  "Name", "Date", "Time", "Duration", "Location", "Status", "Type", "Category",
+  "Start", "End", "Year", "Month", "Day", "Hour", "Minute", "Total", "Final",
+  "Email", "Phone", "Address", "Username", "Password", "Login", "User",
+  "Subject", "Body", "Message", "Content", "Description", "Comment",
+  "Field", "Column", "Row", "Record", "Entry", "Value", "Data", "Label",
+  "Input", "Output", "Result", "Response", "Request", "Report",
+  "Title", "Author", "Owner", "Manager", "Contact", "Reference", "Number",
+]
+
+[[patterns]]
+# 7- or 8-digit numeric ID codes
+name     = "id"
+regex    = '\b\d{7,8}\b'
+template = "preserve_length"
+
+[[patterns]]
+# 8-character mixed alphanumeric codes / usernames (must contain ≥1 letter AND ≥1 digit)
+name     = "username"
+regex    = '\b(?=[a-zA-Z0-9]*[a-zA-Z])(?=[a-zA-Z0-9]*\d)[a-zA-Z0-9]{8}\b'
+template = "user{n:04d}xx"
+
+
+# ── Example: add more patterns below ─────────────────────────────────────────
+#
+# UK National Insurance numbers  (e.g. AB123456C)
+# [[patterns]]
+# name     = "ni_number"
+# regex    = '\b[A-CEGHJ-PR-TW-Z]{2}\d{6}[A-D]\b'
+# regex_flags = ["IGNORECASE"]
+# template = "NI{n:04d}"
+#
+# UK phone numbers
+# [[patterns]]
+# name     = "phone_uk"
+# regex    = '\b(?:0|\+44)\s*\d[\d\s]{8,12}\d\b'
+# template = "PHONE{n:03d}"
+#
+# Postcodes
+# [[patterns]]
+# name     = "postcode"
+# regex    = '\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b'
+# regex_flags = ["IGNORECASE"]
+# template = "PC{n:03d}"
