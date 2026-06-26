@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pseudo_anonymize.py — Pseudo-anonymize PII in documents.
+redact.py — Redact PII in documents.
 
 Replaces personally identifiable information (PII) in a document with
 consistent placeholders, and writes a JSON mapping file that can later
@@ -20,13 +20,13 @@ Detected PII (default config)
   id         1234567  /  12345678           → same-width zero-padded number
   username   ab12cd34  (8-char alphanumeric)→ user0001xx
 
-All patterns are defined in pseudo_anonymize_config.toml.
+All patterns are defined in redact_config.toml.
 Add a [[patterns]] block there to extend detection — no Python changes needed.
 
 Output files
 ------------
-  <stem>_anon.<ext>     anonymized copy of the document
-  <stem>_mapping.json   pseudonym → original  (keep this safe; it reverses the process)
+  <stem>_redacted.<ext>   redacted copy of the document
+  <stem>_mapping.json     pseudonym → original  (keep this safe; it reverses the process)
 
 Install dependencies
 --------------------
@@ -46,7 +46,7 @@ from datetime import datetime
 
 # ── Config loading ─────────────────────────────────────────────────────────────
 
-DEFAULT_CONFIG = Path(__file__).with_name('pseudo_anonymize_config.toml')
+DEFAULT_CONFIG = Path(__file__).with_name('redact_config.toml')
 
 
 def load_config(path: Path) -> dict:
@@ -54,7 +54,7 @@ def load_config(path: Path) -> dict:
     if not path.exists():
         sys.exit(
             f'Error: config file not found: {path}\n'
-            f'       Expected pseudo_anonymize_config.toml next to the script,\n'
+            f'       Expected redact_config.toml next to the script,\n'
             f'       or specify one with --config <file>.'
         )
     with open(path, 'rb') as f:
@@ -128,14 +128,14 @@ class PseudonymRegistry:
         return self._map[key]
 
     def mapping_file_dict(self) -> dict:
-        """Return {pseudonym: original} — the de-anonymization key."""
+        """Return {pseudonym: original} — the restoration key."""
         return {v: k[1] for k, v in self._map.items()}
 
     def stats(self) -> dict:
         return dict(self._counters)
 
 
-# ── Core text anonymization ────────────────────────────────────────────────────
+# ── Core text redaction ────────────────────────────────────────────────────────
 
 def _overlaps(spans: list, start: int, end: int) -> bool:
     """Return True if (start, end) overlaps any span already in the list."""
@@ -151,8 +151,8 @@ def _passes_exclusions(text: str, pat: PatternDef) -> bool:
     return not any(w in pat.exclusions for w in words)
 
 
-def anonymize_text(text: str, registry: PseudonymRegistry,
-                   patterns: list[PatternDef], nlp=None) -> str:
+def redact_text(text: str, registry: PseudonymRegistry,
+                patterns: list[PatternDef], nlp=None) -> str:
     """Scan text for PII using each pattern in order and replace with pseudonyms.
 
     Patterns are applied in config order; the first pattern to claim a span
@@ -192,9 +192,9 @@ def anonymize_text(text: str, registry: PseudonymRegistry,
     return ''.join(chars)
 
 
-# ── Core text de-anonymization ─────────────────────────────────────────────────
+# ── Core text restoration ──────────────────────────────────────────────────────
 
-def deanonymize_text(text: str, pseudo_to_orig: dict) -> str:
+def restore_text(text: str, pseudo_to_orig: dict) -> str:
     """Replace every pseudonym in text with its original value.
 
     Replacements are applied longest-first so that 'person001@anon.invalid'
@@ -210,7 +210,7 @@ def deanonymize_text(text: str, pseudo_to_orig: dict) -> str:
 # ── File handlers ──────────────────────────────────────────────────────────────
 
 def _process_docx_para(para, transform_fn):
-    """Anonymize one paragraph by concatenating all runs, transforming, then
+    """Redact one paragraph by concatenating all runs, transforming, then
     writing the result into the first run and clearing the rest.
 
     Note: this preserves paragraph-level formatting (style, alignment) but
@@ -310,12 +310,12 @@ _HANDLERS = {
     '.pdf':  (process_pdf,  '.txt',  'pdfplumber'),
 }
 
-_DEANON_SUFFIX = {'.docx': '.docx', '.odt': '.odt', '.xlsx': '.xlsx', '.txt': '.txt'}
+_RESTORE_SUFFIX = {'.docx': '.docx', '.odt': '.odt', '.xlsx': '.xlsx', '.txt': '.txt'}
 
 
 # ── Commands ───────────────────────────────────────────────────────────────────
 
-def cmd_anonymize(args):
+def cmd_redact(args):
     input_path = Path(args.input)
     if not input_path.exists():
         sys.exit(f'Error: not found: {input_path}')
@@ -326,7 +326,7 @@ def cmd_anonymize(args):
 
     handler, out_suffix, lib = _HANDLERS[suffix]
     output_path = (Path(args.output) if args.output
-                   else input_path.with_name(input_path.stem + '_anon' + out_suffix))
+                   else input_path.with_name(input_path.stem + '_redacted' + out_suffix))
     mapping_path = (Path(args.mapping) if args.mapping
                     else input_path.with_name(input_path.stem + '_mapping.json'))
 
@@ -352,9 +352,9 @@ def cmd_anonymize(args):
             print('       python -m spacy download', model)
 
     registry = PseudonymRegistry()
-    transform = lambda text: anonymize_text(text, registry, patterns, nlp)
+    transform = lambda text: redact_text(text, registry, patterns, nlp)
 
-    print(f'Anonymizing: {input_path}')
+    print(f'Redacting:   {input_path}')
     try:
         handler(input_path, output_path, transform)
     except ImportError as exc:
@@ -362,7 +362,7 @@ def cmd_anonymize(args):
 
     mapping_doc = {
         'source_file': str(input_path.resolve()),
-        'anonymized_file': str(output_path.resolve()),
+        'redacted_file': str(output_path.resolve()),
         'created': datetime.now().isoformat(timespec='seconds'),
         'spacy_ner_used': nlp is not None,
         'stats': registry.stats(),
@@ -385,7 +385,7 @@ def cmd_anonymize(args):
             print('       Install spaCy for better name detection.')
 
 
-def cmd_deanonymize(args):
+def cmd_restore(args):
     input_path = Path(args.input)
     if not input_path.exists():
         sys.exit(f'Error: not found: {input_path}')
@@ -393,8 +393,8 @@ def cmd_deanonymize(args):
     mapping_path = Path(args.mapping) if args.mapping else None
     if mapping_path is None:
         stem = input_path.stem
-        if stem.endswith('_anon'):
-            stem = stem[:-5]
+        if stem.endswith('_redacted'):
+            stem = stem[:-9]
         mapping_path = input_path.with_name(stem + '_mapping.json')
 
     if not mapping_path.exists():
@@ -410,13 +410,13 @@ def cmd_deanonymize(args):
     if suffix not in _HANDLERS and suffix != '.txt':
         sys.exit(f"Error: unsupported type '{suffix}'.")
 
-    out_suffix = _DEANON_SUFFIX.get(suffix, suffix)
+    out_suffix = _RESTORE_SUFFIX.get(suffix, suffix)
     output_path = (Path(args.output) if args.output
                    else input_path.with_name(input_path.stem + '_restored' + out_suffix))
 
-    transform = lambda text: deanonymize_text(text, pseudo_to_orig)
+    transform = lambda text: restore_text(text, pseudo_to_orig)
 
-    print(f'De-anonymizing: {input_path}')
+    print(f'Restoring:   {input_path}')
     try:
         if suffix == '.txt':
             output_path.write_text(
@@ -437,41 +437,42 @@ def cmd_deanonymize(args):
 
 _EXAMPLES = """
 examples:
-  # Anonymize a Word document (output: report_anon.docx + report_mapping.json)
-  python3 pseudo_anonymize.py report.docx
+  # Redact a Word document (output: report_redacted.docx + report_mapping.json)
+  python3 redact.py report.docx
 
-  # Anonymize an Excel spreadsheet with custom output paths
-  python3 pseudo_anonymize.py data.xlsx -o data_safe.xlsx -m data_keys.json
+  # Redact an Excel spreadsheet with custom output paths
+  python3 redact.py data.xlsx -o data_safe.xlsx -m data_keys.json
 
-  # Anonymize a PDF (output is plain text — PDF formatting cannot be preserved)
-  python3 pseudo_anonymize.py notes.pdf
+  # Redact a PDF (output is plain text — PDF formatting cannot be preserved)
+  python3 redact.py notes.pdf
 
-  # De-anonymize — auto-locates the mapping file from the filename
-  python3 pseudo_anonymize.py report_anon.docx --deanonymize
+  # Restore — auto-locates the mapping file from the filename
+  python3 redact.py report_redacted.docx --restore
+  # → report_redacted_restored.docx
 
-  # De-anonymize with an explicit mapping file
-  python3 pseudo_anonymize.py report_anon.docx -d -m /secure/report_mapping.json
+  # Restore with an explicit mapping file
+  python3 redact.py report_redacted.docx -r -m /secure/report_mapping.json
 
   # Use a custom pattern config instead of the default
-  python3 pseudo_anonymize.py report.docx --config my_patterns.toml
+  python3 redact.py report.docx --config my_patterns.toml
 
   # Disable spaCy NER (faster, uses regex heuristic for names instead)
-  python3 pseudo_anonymize.py report.docx --no-spacy
+  python3 redact.py report.docx --no-spacy
 
-detected PII  (default config — edit pseudo_anonymize_config.toml to extend):
+detected PII  (default config — edit redact_config.toml to extend):
   email      user@domain.tld              → person001@anon.invalid
   name       Alice Smith                  → Person001  (spaCy NER or title-case heuristic)
   id         1234567  /  12345678         → 0000001  /  00000001  (same digit count)
   username   ab12cd34  (8-char mixed)     → user0001xx
 
 output files:
-  <stem>_anon.<ext>     anonymized copy of the document
-  <stem>_mapping.json   pseudonym→original map — keep this safe and separate
-                        from the anonymized file; it is the only way to reverse
-                        the process
+  <stem>_redacted.<ext>   redacted copy of the document
+  <stem>_mapping.json     pseudonym→original map — keep this safe and separate
+                          from the redacted file; it is the only way to reverse
+                          the process
 
 adding new patterns:
-  Append a [[patterns]] block to pseudo_anonymize_config.toml.  No Python
+  Append a [[patterns]] block to redact_config.toml.  No Python
   changes are needed.  Example — UK National Insurance numbers:
 
     [[patterns]]
@@ -485,8 +486,8 @@ adding new patterns:
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            'Pseudo-anonymize PII in Word (.docx), ODT, Excel (.xlsx), and PDF files.\n'
-            'Patterns are configured in pseudo_anonymize_config.toml — add a [[patterns]]\n'
+            'Redact PII in Word (.docx), ODT, Excel (.xlsx), and PDF files.\n'
+            'Patterns are configured in redact_config.toml — add a [[patterns]]\n'
             'block there to extend detection without changing any Python code.'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -494,7 +495,7 @@ def main():
     )
     parser.add_argument('input', help='Input file (.docx / .odt / .xlsx / .pdf)')
     parser.add_argument('--output', '-o', metavar='FILE',
-                        help='Output path (default: <input>_anon.<ext>)')
+                        help='Output path (default: <input>_redacted.<ext>)')
     parser.add_argument('--mapping', '-m', metavar='FILE',
                         help='Mapping JSON path (default: <input>_mapping.json)')
     parser.add_argument('--config', '-c', metavar='FILE',
@@ -502,15 +503,15 @@ def main():
                         help=f'Config TOML path (default: {DEFAULT_CONFIG.name} next to script)')
     parser.add_argument('--no-spacy', action='store_true',
                         help='Disable spaCy NER (faster; uses regex heuristic for names)')
-    parser.add_argument('--deanonymize', '-d', action='store_true',
+    parser.add_argument('--restore', '-r', action='store_true',
                         help='Reverse: restore originals from mapping file')
 
     args = parser.parse_args()
 
-    if args.deanonymize:
-        cmd_deanonymize(args)
+    if args.restore:
+        cmd_restore(args)
     else:
-        cmd_anonymize(args)
+        cmd_redact(args)
 
 
 if __name__ == '__main__':

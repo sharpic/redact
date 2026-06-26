@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-pseudo_anonymize_tests.py — Unit and integration tests.
+redact_tests.py — Unit and integration tests.
 
-Run all:   python3 -m pytest pseudo_anonymize_tests.py -v
-Run fast:  python3 -m pytest pseudo_anonymize_tests.py -v -m "not slow"
+Run all:   python3 -m pytest redact_tests.py -v
+Run fast:  python3 -m pytest redact_tests.py -v -m "not slow"
 """
 
 import re
@@ -14,15 +14,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from pseudo_anonymize import (
+from redact import (
     _apply_template,
     _overlaps,
     _passes_exclusions,
     PseudonymRegistry,
     PatternDef,
     build_patterns,
-    anonymize_text,
-    deanonymize_text,
+    redact_text,
+    restore_text,
     load_config,
     DEFAULT_CONFIG,
 )
@@ -64,10 +64,10 @@ def _pat_username():
 def _all_patterns():
     return [_pat_email(), _pat_name(), _pat_id(), _pat_username()]
 
-def _anon(text, patterns=None):
-    """Convenience: anonymize with a fresh registry, return (result, registry)."""
+def _redact(text, patterns=None):
+    """Convenience: redact with a fresh registry, return (result, registry)."""
     registry = PseudonymRegistry()
-    result = anonymize_text(text, registry, patterns or _all_patterns(), nlp=None)
+    result = redact_text(text, registry, patterns or _all_patterns(), nlp=None)
     return result, registry
 
 
@@ -234,115 +234,115 @@ class TestPseudonymRegistry(unittest.TestCase):
         self.assertEqual(self.reg.stats(), {'email': 2, 'name': 1})
 
 
-# ── anonymize_text ─────────────────────────────────────────────────────────────
+# ── redact_text ────────────────────────────────────────────────────────────────
 
 class TestAnonymizeText(unittest.TestCase):
 
     # ── email ──────────────────────────────────────────────────────────────────
 
     def test_email_replaced(self):
-        result, _ = _anon('Contact user@example.com today')
+        result, _ = _redact('Contact user@example.com today')
         self.assertNotIn('user@example.com', result)
         self.assertIn('@anon.invalid', result)
 
     def test_email_with_plus_addressing(self):
-        result, _ = _anon('Send to user+tag@example.com please')
+        result, _ = _redact('Send to user+tag@example.com please')
         self.assertNotIn('user+tag@example.com', result)
         self.assertIn('@anon.invalid', result)
 
     def test_email_with_subdomain(self):
-        result, _ = _anon('Reply to user@mail.dept.ac.uk here')
+        result, _ = _redact('Reply to user@mail.dept.ac.uk here')
         self.assertNotIn('@mail.dept.ac.uk', result)
 
     # ── IDs ────────────────────────────────────────────────────────────────────
 
     def test_7_digit_id_replaced(self):
-        result, _ = _anon('Student 1234567 enrolled')
+        result, _ = _redact('Student 1234567 enrolled')
         self.assertNotIn('1234567', result)
         self.assertIn('0000001', result)
 
     def test_8_digit_id_replaced(self):
-        result, _ = _anon('Ref 12345678 filed')
+        result, _ = _redact('Ref 12345678 filed')
         self.assertNotIn('12345678', result)
         self.assertIn('00000001', result)
 
     def test_7_digit_preserves_length(self):
-        result, _ = _anon('ID: 1234567')
+        result, _ = _redact('ID: 1234567')
         replaced = [t for t in result.split() if t.isdigit()]
         self.assertTrue(all(len(t) == 7 for t in replaced))
 
     def test_8_digit_preserves_length(self):
-        result, _ = _anon('ID: 12345678')
+        result, _ = _redact('ID: 12345678')
         replaced = [t for t in result.split() if t.isdigit()]
         self.assertTrue(all(len(t) == 8 for t in replaced))
 
     def test_6_digit_not_caught(self):
-        result, _ = _anon('Code 123456 here')
+        result, _ = _redact('Code 123456 here')
         self.assertIn('123456', result)
 
     def test_9_digit_not_caught(self):
-        result, _ = _anon('Number 123456789 here')
+        result, _ = _redact('Number 123456789 here')
         self.assertIn('123456789', result)
 
     def test_id_embedded_in_longer_number_not_caught(self):
         # \b ensures 1234567 inside 012345678 is not extracted
-        result, _ = _anon('Code 012345678 here')
+        result, _ = _redact('Code 012345678 here')
         self.assertIn('012345678', result)
 
     # ── usernames ──────────────────────────────────────────────────────────────
 
     def test_8_char_mixed_username_replaced(self):
-        result, _ = _anon('Login: jsmith01 via portal')
+        result, _ = _redact('Login: jsmith01 via portal')
         self.assertNotIn('jsmith01', result)
         self.assertIn('user0001xx', result)
 
     def test_all_digit_8_char_not_a_username(self):
-        result, _ = _anon('Code: 12345678')
+        result, _ = _redact('Code: 12345678')
         self.assertNotIn('user', result)  # caught as id, not username
 
     def test_all_alpha_8_char_not_a_username(self):
-        result, _ = _anon('Word: password')
+        result, _ = _redact('Word: password')
         self.assertNotIn('user', result)
 
     def test_7_char_mixed_not_a_username(self):
-        result, _ = _anon('ref: abc1234')  # only 7 chars
+        result, _ = _redact('ref: abc1234')  # only 7 chars
         self.assertNotIn('user', result)
 
     def test_9_char_mixed_not_a_username(self):
-        result, _ = _anon('ref: abc123def')  # 9 chars
+        result, _ = _redact('ref: abc123def')  # 9 chars
         self.assertNotIn('user', result)
 
     # ── names (heuristic, no spaCy) ────────────────────────────────────────────
 
     def test_name_heuristic_two_words(self):
-        result, _ = _anon('Signed by John Smith', patterns=[_pat_name()])
+        result, _ = _redact('Signed by John Smith', patterns=[_pat_name()])
         self.assertNotIn('John Smith', result)
         self.assertIn('Person', result)
 
     def test_name_heuristic_three_words(self):
-        result, _ = _anon('Written by Mary Anne Jones', patterns=[_pat_name()])
+        result, _ = _redact('Written by Mary Anne Jones', patterns=[_pat_name()])
         self.assertNotIn('Mary Anne Jones', result)
 
     def test_excluded_word_not_detected_as_name(self):
-        result, _ = _anon('Date is January Monday')
+        result, _ = _redact('Date is January Monday')
         self.assertIn('January', result)
         self.assertIn('Monday', result)
 
     def test_single_title_case_word_not_caught(self):
         # A capitalised word not adjacent to another title-case word is not a name
-        result, _ = _anon('Submit the Report today', patterns=[_pat_name()])
+        result, _ = _redact('Submit the Report today', patterns=[_pat_name()])
         self.assertIn('Report', result)
 
     # ── overlap / ordering ─────────────────────────────────────────────────────
 
     def test_email_not_double_detected_as_name(self):
-        result, _ = _anon('Email: John.Smith@example.com here')
+        result, _ = _redact('Email: John.Smith@example.com here')
         self.assertEqual(result.count('@anon.invalid'), 1)
         self.assertNotIn('Person', result)
 
     def test_first_pattern_wins_on_overlap(self):
         # Email pattern runs before name; the email address wins
-        result, _ = _anon('Contact John.Smith@example.com')
+        result, _ = _redact('Contact John.Smith@example.com')
         self.assertIn('@anon.invalid', result)
         self.assertNotIn('Person', result)
 
@@ -351,13 +351,13 @@ class TestAnonymizeText(unittest.TestCase):
     def test_consistent_replacement_across_calls(self):
         registry = PseudonymRegistry()
         pats = _all_patterns()
-        r1 = anonymize_text('user@x.com', registry, pats, nlp=None)
-        r2 = anonymize_text('user@x.com', registry, pats, nlp=None)
+        r1 = redact_text('user@x.com', registry, pats, nlp=None)
+        r2 = redact_text('user@x.com', registry, pats, nlp=None)
         self.assertEqual(r1, r2)
 
     def test_two_occurrences_get_same_pseudonym(self):
         registry = PseudonymRegistry()
-        result = anonymize_text(
+        result = redact_text(
             'From user@x.com to user@x.com', registry, _all_patterns(), nlp=None
         )
         hits = [w for w in result.split() if '@anon.invalid' in w]
@@ -365,46 +365,46 @@ class TestAnonymizeText(unittest.TestCase):
         self.assertEqual(hits[0], hits[1])
 
     def test_different_values_get_different_pseudonyms(self):
-        result, _ = _anon('a@x.com and b@x.com')
+        result, _ = _redact('a@x.com and b@x.com')
         self.assertIn('person001@anon.invalid', result)
         self.assertIn('person002@anon.invalid', result)
 
     # ── edge cases ─────────────────────────────────────────────────────────────
 
     def test_empty_string(self):
-        result, _ = _anon('')
+        result, _ = _redact('')
         self.assertEqual(result, '')
 
     def test_whitespace_only(self):
-        result, _ = _anon('   ')
+        result, _ = _redact('   ')
         self.assertEqual(result, '   ')
 
     def test_no_pii_unchanged(self):
         text = 'No sensitive data here at all.'
-        result, _ = _anon(text, patterns=[_pat_email(), _pat_id(), _pat_username()])
+        result, _ = _redact(text, patterns=[_pat_email(), _pat_id(), _pat_username()])
         self.assertEqual(result, text)
 
     def test_pii_at_start(self):
-        result, _ = _anon('user@x.com is the contact', patterns=[_pat_email()])
+        result, _ = _redact('user@x.com is the contact', patterns=[_pat_email()])
         self.assertNotIn('user@x.com', result)
 
     def test_pii_at_end(self):
-        result, _ = _anon('contact is user@x.com', patterns=[_pat_email()])
+        result, _ = _redact('contact is user@x.com', patterns=[_pat_email()])
         self.assertNotIn('user@x.com', result)
 
     def test_multiple_pii_types_on_one_line(self):
-        result, _ = _anon('user@x.com 1234567 ab12cd34')
+        result, _ = _redact('user@x.com 1234567 ab12cd34')
         self.assertNotIn('user@x.com', result)
         self.assertNotIn('1234567', result)
         self.assertNotIn('ab12cd34', result)
 
     def test_unicode_context_untouched(self):
-        result, _ = _anon('Ünïcödé context, email user@x.com here')
+        result, _ = _redact('Ünïcödé context, email user@x.com here')
         self.assertIn('Ünïcödé', result)
         self.assertNotIn('user@x.com', result)
 
 
-# ── deanonymize_text ───────────────────────────────────────────────────────────
+# ── restore_text ───────────────────────────────────────────────────────────────
 
 class TestDeanonymizeText(unittest.TestCase):
 
@@ -417,27 +417,27 @@ class TestDeanonymizeText(unittest.TestCase):
         }
 
     def test_name_reversal(self):
-        self.assertEqual(deanonymize_text('Hello Person001', self.mapping),
+        self.assertEqual(restore_text('Hello Person001', self.mapping),
                          'Hello John Smith')
 
     def test_email_reversal(self):
-        self.assertEqual(deanonymize_text('Email: person001@anon.invalid', self.mapping),
+        self.assertEqual(restore_text('Email: person001@anon.invalid', self.mapping),
                          'Email: john@example.com')
 
     def test_id_reversal(self):
-        self.assertEqual(deanonymize_text('ID 0000001 enrolled', self.mapping),
+        self.assertEqual(restore_text('ID 0000001 enrolled', self.mapping),
                          'ID 1234567 enrolled')
 
     def test_multiple_types_reversed(self):
-        result = deanonymize_text('Person001 <person001@anon.invalid>', self.mapping)
+        result = restore_text('Person001 <person001@anon.invalid>', self.mapping)
         self.assertEqual(result, 'John Smith <john@example.com>')
 
     def test_empty_string(self):
-        self.assertEqual(deanonymize_text('', self.mapping), '')
+        self.assertEqual(restore_text('', self.mapping), '')
 
     def test_no_pseudonyms_unchanged(self):
         text = 'Nothing to replace here.'
-        self.assertEqual(deanonymize_text(text, self.mapping), text)
+        self.assertEqual(restore_text(text, self.mapping), text)
 
     def test_longest_first_prevents_partial_match(self):
         # 'person001@anon.invalid' contains 'person001' as a substring.
@@ -446,19 +446,19 @@ class TestDeanonymizeText(unittest.TestCase):
             'person001@anon.invalid': 'real@email.com',
             'person001': 'PARTIAL',
         }
-        result = deanonymize_text('person001@anon.invalid', mapping)
+        result = restore_text('person001@anon.invalid', mapping)
         self.assertEqual(result, 'real@email.com')
 
 
 # ── round-trips ────────────────────────────────────────────────────────────────
 
 class TestRoundTrip(unittest.TestCase):
-    """anonymize → deanonymize must exactly restore the original."""
+    """redact → restore must exactly restore the original."""
 
     def _trip(self, text):
         registry = PseudonymRegistry()
-        anon = anonymize_text(text, registry, _all_patterns(), nlp=None)
-        return deanonymize_text(anon, registry.mapping_file_dict())
+        redacted = redact_text(text, registry, _all_patterns(), nlp=None)
+        return restore_text(redacted, registry.mapping_file_dict())
 
     def test_email(self):
         t = 'Contact user@example.com for details'
@@ -654,14 +654,14 @@ class TestFileHandlerDocx(unittest.TestCase):
             self.skipTest('python-docx not installed')
 
     def test_paragraph_anonymized(self):
-        from pseudo_anonymize import process_docx
+        from redact import process_docx
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.docx'
             out = Path(d) / 'out.docx'
             _make_docx(src, paragraphs=['John Smith emailed user@example.com ID 1234567'])
 
             registry = PseudonymRegistry()
-            process_docx(src, out, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_docx(src, out, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
 
             text = _read_docx_para(out)
             self.assertNotIn('user@example.com', text)
@@ -669,32 +669,32 @@ class TestFileHandlerDocx(unittest.TestCase):
 
     def test_table_cells_anonymized(self):
         from docx import Document
-        from pseudo_anonymize import process_docx
+        from redact import process_docx
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.docx'
             out = Path(d) / 'out.docx'
             _make_docx(src, table_rows=[['user@example.com', '1234567']])
 
             registry = PseudonymRegistry()
-            process_docx(src, out, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_docx(src, out, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
 
             doc2 = Document(str(out))
             self.assertNotIn('user@example.com', doc2.tables[0].cell(0, 0).text)
             self.assertNotIn('1234567', doc2.tables[0].cell(0, 1).text)
 
     def test_round_trip(self):
-        from pseudo_anonymize import process_docx
+        from redact import process_docx
         original = 'user@example.com ID 1234567'
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.docx'
-            anon = Path(d) / 'anon.docx'
+            redacted = Path(d) / 'redacted.docx'
             restored_path = Path(d) / 'restored.docx'
             _make_docx(src, paragraphs=[original])
 
             registry = PseudonymRegistry()
-            process_docx(src, anon, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_docx(src, redacted, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
             mapping = registry.mapping_file_dict()
-            process_docx(anon, restored_path, lambda t: deanonymize_text(t, mapping))
+            process_docx(redacted, restored_path, lambda t: restore_text(t, mapping))
 
             text = _read_docx_para(restored_path)
             self.assertIn('user@example.com', text)
@@ -702,14 +702,14 @@ class TestFileHandlerDocx(unittest.TestCase):
 
     def test_empty_paragraphs_untouched(self):
         from docx import Document
-        from pseudo_anonymize import process_docx
+        from redact import process_docx
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.docx'
             out = Path(d) / 'out.docx'
             _make_docx(src, paragraphs=['', 'normal text', ''])
 
             registry = PseudonymRegistry()
-            process_docx(src, out, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_docx(src, out, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
 
             paras = [p.text for p in Document(str(out)).paragraphs]
             self.assertIn('normal text', paras)
@@ -732,7 +732,7 @@ class TestFileHandlerXlsx(unittest.TestCase):
             self.skipTest('openpyxl not installed')
 
     def test_string_cells_anonymized(self):
-        from pseudo_anonymize import process_xlsx
+        from redact import process_xlsx
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.xlsx'
             out = Path(d) / 'out.xlsx'
@@ -744,7 +744,7 @@ class TestFileHandlerXlsx(unittest.TestCase):
             wb.save(str(src))
 
             registry = PseudonymRegistry()
-            process_xlsx(src, out, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_xlsx(src, out, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
 
             wb2 = self.openpyxl.load_workbook(str(out))
             flat = [str(v) for row in wb2.active.iter_rows(values_only=True)
@@ -753,7 +753,7 @@ class TestFileHandlerXlsx(unittest.TestCase):
             self.assertNotIn('1234567', flat)
 
     def test_numeric_cells_untouched(self):
-        from pseudo_anonymize import process_xlsx
+        from redact import process_xlsx
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.xlsx'
             out = Path(d) / 'out.xlsx'
@@ -765,14 +765,14 @@ class TestFileHandlerXlsx(unittest.TestCase):
             wb.save(str(src))
 
             registry = PseudonymRegistry()
-            process_xlsx(src, out, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_xlsx(src, out, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
 
             wb2 = self.openpyxl.load_workbook(str(out))
             self.assertEqual(wb2.active['A1'].value, 42)
             self.assertAlmostEqual(wb2.active['B1'].value, 3.14)
 
     def test_multiple_sheets_processed(self):
-        from pseudo_anonymize import process_xlsx
+        from redact import process_xlsx
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.xlsx'
             out = Path(d) / 'out.xlsx'
@@ -784,17 +784,17 @@ class TestFileHandlerXlsx(unittest.TestCase):
             wb.save(str(src))
 
             registry = PseudonymRegistry()
-            process_xlsx(src, out, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_xlsx(src, out, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
 
             wb2 = self.openpyxl.load_workbook(str(out))
             self.assertNotIn('user@a.com', str(wb2.active['A1'].value))
             self.assertNotIn('user@b.com', str(wb2['Sheet2']['A1'].value))
 
     def test_round_trip(self):
-        from pseudo_anonymize import process_xlsx
+        from redact import process_xlsx
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.xlsx'
-            anon = Path(d) / 'anon.xlsx'
+            red = Path(d) / 'redacted.xlsx'
             rest = Path(d) / 'rest.xlsx'
 
             wb = self.openpyxl.Workbook()
@@ -803,9 +803,9 @@ class TestFileHandlerXlsx(unittest.TestCase):
             wb.save(str(src))
 
             registry = PseudonymRegistry()
-            process_xlsx(src, anon, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_xlsx(src, red, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
             mapping = registry.mapping_file_dict()
-            process_xlsx(anon, rest, lambda t: deanonymize_text(t, mapping))
+            process_xlsx(red, rest, lambda t: restore_text(t, mapping))
 
             wb3 = self.openpyxl.load_workbook(str(rest))
             flat = [str(v) for row in wb3.active.iter_rows(values_only=True) for v in row if v]
@@ -853,31 +853,31 @@ class TestFileHandlerOdt(unittest.TestCase):
             self.skipTest('odfpy not installed')
 
     def test_text_anonymized(self):
-        from pseudo_anonymize import process_odt
+        from redact import process_odt
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.odt'
             out = Path(d) / 'out.odt'
             _make_odt(src, 'Contact user@example.com ID 1234567')
 
             registry = PseudonymRegistry()
-            process_odt(src, out, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_odt(src, out, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
 
             content = _read_odt(out)
             self.assertNotIn('user@example.com', content)
             self.assertNotIn('1234567', content)
 
     def test_round_trip(self):
-        from pseudo_anonymize import process_odt
+        from redact import process_odt
         with tempfile.TemporaryDirectory() as d:
             src = Path(d) / 'src.odt'
-            anon = Path(d) / 'anon.odt'
+            red = Path(d) / 'redacted.odt'
             rest = Path(d) / 'rest.odt'
             _make_odt(src, 'user@example.com 1234567')
 
             registry = PseudonymRegistry()
-            process_odt(src, anon, lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+            process_odt(src, red, lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
             mapping = registry.mapping_file_dict()
-            process_odt(anon, rest, lambda t: deanonymize_text(t, mapping))
+            process_odt(red, rest, lambda t: restore_text(t, mapping))
 
             content = _read_odt(rest)
             self.assertIn('user@example.com', content)
@@ -899,22 +899,22 @@ class TestFileHandlerPdf(unittest.TestCase):
             self.skipTest('no test PDF found in project directory')
 
     def test_produces_text_file(self):
-        from pseudo_anonymize import process_pdf
+        from redact import process_pdf
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / 'out.txt'
             registry = PseudonymRegistry()
             process_pdf(self.pdf, out,
-                        lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+                        lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
             self.assertTrue(out.exists())
             self.assertGreater(out.stat().st_size, 0)
 
     def test_emails_replaced_in_output(self):
-        from pseudo_anonymize import process_pdf
+        from redact import process_pdf
         with tempfile.TemporaryDirectory() as d:
             out = Path(d) / 'out.txt'
             registry = PseudonymRegistry()
             process_pdf(self.pdf, out,
-                        lambda t: anonymize_text(t, registry, _all_patterns(), nlp=None))
+                        lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
             text = out.read_text(encoding='utf-8')
             # The calendar contains manchester.ac.uk addresses
             self.assertNotIn('@manchester.ac.uk', text)
@@ -942,7 +942,7 @@ class TestSpacyNER(unittest.TestCase):
 
     def _run(self, text):
         registry = PseudonymRegistry()
-        return anonymize_text(text, registry, self.patterns, nlp=self.nlp), registry
+        return redact_text(text, registry, self.patterns, nlp=self.nlp), registry
 
     def test_person_name_detected(self):
         result, _ = self._run('The report was written by Alice Johnson.')
@@ -968,8 +968,8 @@ class TestSpacyNER(unittest.TestCase):
     def test_round_trip_with_spacy(self):
         original = 'Alice Johnson <alice@example.com> ID 1234567'
         registry = PseudonymRegistry()
-        anon = anonymize_text(original, registry, self.patterns, nlp=self.nlp)
-        restored = deanonymize_text(anon, registry.mapping_file_dict())
+        redacted = redact_text(original, registry, self.patterns, nlp=self.nlp)
+        restored = restore_text(redacted, registry.mapping_file_dict())
         self.assertEqual(restored, original)
 
     def test_id_and_username_still_caught(self):
