@@ -123,9 +123,10 @@ python3 redact.py report_redacted.docx -r -m /secure/report_mapping.json
 python3 redact.py report.docx --config my_patterns.toml
 ```
 
-### Also redact person names / proper nouns
+### Also redact organisations, places, and other proper nouns
 
-Name detection is opt-in because it has the highest false-positive rate. Enable it with `-pn` or `-rn`:
+By default the tool redacts person names. Add `-pn` to also catch organisations,
+places, nationalities, and other proper nouns (spaCy ORG, GPE, NORP entities):
 
 ```bash
 python3 redact.py report.docx --proper-nouns   # long form
@@ -133,27 +134,57 @@ python3 redact.py report.docx -pn              # short form
 python3 redact.py report.docx -rn              # alias (real names)
 ```
 
-Uses spaCy NER when available, falling back to a title-case word heuristic.
+Uses spaCy NER when available, falling back to a broader Title Case word heuristic.
+Person names are always redacted regardless of this flag.
 
-### Disable spaCy when redacting names (faster, regex-only)
+### Link names split across columns in Excel
+
+If a spreadsheet stores first and last names in separate columns, use `-mcn` so
+that each fragment is detected and gets its own pseudonym:
 
 ```bash
-python3 redact.py report.docx -pn --no-spacy
+python3 redact.py staff.xlsx --multi-col-names
+python3 redact.py staff.xlsx -mcn              # short form
+```
+
+What it does:
+- **Row-combination scan**: joins all string cells in a row before NER runs, so
+  `"Alice"` and `"Johnson"` in adjacent cells are seen as `"Alice Johnson"`.
+- **Header-aware scan**: explicitly combines columns whose headers are recognised
+  name fields (`First Name`, `Surname`, `Forename`, etc.).
+- Each fragment (`Alice`, `Johnson`) gets its own pseudonym so de-redaction
+  restores every cell to its original value.
+
+This flag only applies to `.xlsx` files; it is silently ignored for other formats.
+
+### Combine flags
+
+Flags compose freely. To redact a staff spreadsheet including org names:
+
+```bash
+python3 redact.py staff.xlsx -pn -mcn
+```
+
+### Disable spaCy (faster, regex-only)
+
+```bash
+python3 redact.py report.docx --no-spacy
 ```
 
 ### Full option reference
 
 ```
 positional arguments:
-  input                     Input file (.docx / .odt / .xlsx / .pdf)
+  input                       Input file (.docx / .odt / .xlsx / .pdf)
 
 options:
-  -o, --output FILE         Output path (default: <input>_redacted.<ext>)
-  -m, --mapping FILE        Mapping JSON (default: <input>_mapping.json)
-  -c, --config FILE         Config TOML (default: redact_config.toml)
-  -pn, -rn, --proper-nouns  Also redact person names / proper nouns
-  --no-spacy                Use regex heuristic instead of spaCy for names
-  -r, --restore             Reverse mode: restore originals from mapping file
+  -o, --output FILE           Output path (default: <input>_redacted.<ext>)
+  -m, --mapping FILE          Mapping JSON (default: <input>_mapping.json)
+  -c, --config FILE           Config TOML (default: redact_config.toml)
+  -pn, -rn, --proper-nouns    Also redact organisations, places, and other proper nouns
+  -mcn, --multi-col-names     Excel: detect names split across columns (see above)
+  --no-spacy                  Use regex heuristic instead of spaCy for names
+  -r, --restore               Reverse mode: restore originals from mapping file
 ```
 
 ---
@@ -233,7 +264,7 @@ template    = "PC{n:03d}"
 - **DOCX / ODT:** paragraph-level formatting (styles, spacing, alignment) is preserved. Per-run character formatting (bold/italic on individual words) may be collapsed within replaced spans.
 - **PDF:** output is plain text. The redacted file loses all layout and formatting.
 - **Name detection without spaCy:** the title-case heuristic catches consecutive capitalized words, which can produce false positives in documents with many heading-style phrases. Install spaCy for significantly better accuracy.
-- **Cross-cell PII:** a value split across multiple cells or paragraphs will not be detected. PII must appear within a single text unit.
+- **Cross-cell PII in Excel:** names split across columns (e.g. first name / last name) are not detected by default. Use `-mcn` to enable row-combination and header-aware pre-scanning for `.xlsx` files. Other formats still require PII to appear within a single text unit.
 - **No guarantee of completeness:** redaction is a best-effort process. Review the output and the stats before sharing a file.
 
 ---
@@ -244,7 +275,7 @@ template    = "PC{n:03d}"
 python3 -m pytest redact_tests.py -v
 ```
 
-116 tests covering templates, span overlap, exclusions, registry consistency, round-trip redaction/restoration for all file formats, and spaCy NER.
+129 tests covering templates, span overlap, exclusions, registry consistency, round-trip redaction/restoration for all file formats, spaCy NER, the `-pn` proper-noun flag, and the `-mcn` split-column detection.
 
 ---
 
