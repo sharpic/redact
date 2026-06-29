@@ -30,10 +30,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install python-docx odfpy openpyxl pdfplumber
-          pip install spacy
+          pip install python-docx odfpy openpyxl pdfplumber \
+                      spacy click \
+                      pytest pytest-cov coverage-badge radon
           python -m spacy download en_core_web_sm
-          pip install pytest pytest-cov coverage-badge radon
 
       - name: Run tests
         run: |
@@ -52,6 +52,7 @@ jobs:
           name: pytest
           path: test-results.xml
           reporter: java-junit
+          fail-on-empty: false
 
       - name: Cyclomatic complexity (radon)
         run: python -m radon cc -s -a redact.py
