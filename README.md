@@ -281,6 +281,19 @@ python3 -m pytest redact_tests.py -v
 
 129 tests covering templates, span overlap, exclusions, registry consistency, round-trip redaction/restoration for all file formats, spaCy NER, the `-pn` proper-noun flag, and the `-mcn` split-column detection.
 
+## CI reports
+
+Each push to `main` runs the full CI pipeline. **[View the latest run →](https://github.com/sharpic/redact/actions/workflows/ci.yml?query=branch%3Amain)**
+
+The run summary page includes:
+
+| Report | Where to find it |
+|---|---|
+| CRAP scores (per function) | Run summary — scroll below the job list |
+| Per-test pass / fail | **Checks** tab on any commit |
+| HTML coverage report | **Artifacts** section of the run → download `coverage-html` |
+| Cyclomatic complexity (radon) | Run → `test` job → expand `Cyclomatic complexity` step |
+
 ---
 
 ## Project structure
