@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Keep pip dependencies up to date
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Keep GitHub Actions version pins up to date
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
