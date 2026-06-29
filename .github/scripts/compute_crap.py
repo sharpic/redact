@@ -8,6 +8,7 @@ Scores above 30 are flagged. All output is informational — this script never
 exits non-zero so it does not block the build.
 """
 import json
+import os
 import re
 import subprocess
 import sys
@@ -87,6 +88,9 @@ for f in functions:
     rows.append((f['name'], f['cc'], cov_pct, crap(f['cc'], cov_pct)))
 
 rows.sort(key=lambda r: -r[3])
+high = [r for r in rows if r[3] > WARN_THRESHOLD]
+
+# ── plain-text output for the step log ───────────────────────────────────────
 
 col = max((len(r[0]) for r in rows), default=10)
 print(f"\n{'Function':<{col}}  {'CC':>4}  {'Cov%':>6}  {'CRAP':>7}  Note")
@@ -94,11 +98,30 @@ print('─' * (col + 32))
 for name, cc, cov_pct, score in rows:
     note = '⚠  consider refactoring or adding tests' if score > WARN_THRESHOLD else ''
     print(f"{name:<{col}}  {cc:>4}  {cov_pct:>6.1f}  {score:>7.1f}  {note}")
-
 print()
-high = [r for r in rows if r[3] > WARN_THRESHOLD]
 if high:
     print(f'{len(high)} function(s) with CRAP > {WARN_THRESHOLD} (informational — build not blocked)')
 else:
     print(f'All functions within acceptable CRAP threshold (<= {WARN_THRESHOLD})')
 print()
+
+# ── GitHub Actions step summary (appears on the run summary page) ─────────────
+
+summary = os.environ.get('GITHUB_STEP_SUMMARY')
+if summary:
+    with open(summary, 'a') as f:
+        f.write('## CRAP Scores\n\n')
+        f.write('> CRAP = complexity² × (1 − branch_coverage)³ + complexity  '
+                '— scores above 30 are flagged\n\n')
+        f.write('| Function | CC | Cov% | CRAP | |\n')
+        f.write('|:---|---:|---:|---:|:---|\n')
+        for name, cc, cov_pct, score in rows:
+            flag = '⚠' if score > WARN_THRESHOLD else ''
+            f.write(f'| `{name}` | {cc} | {cov_pct:.1f} | **{score:.1f}** | {flag} |\n')
+        f.write('\n')
+        if high:
+            f.write(f'> ⚠ {len(high)} function(s) above threshold — '
+                    'informational only, build not blocked\n\n')
+        else:
+            f.write(f'> ✅ All functions within acceptable threshold (≤ {WARN_THRESHOLD})\n\n')
+        f.write('_HTML coverage report (with per-function CRAP column) available as a build artifact._\n')
