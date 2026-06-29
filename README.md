@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/sharpic/redact/actions/workflows/ci.yml/badge.svg)](https://github.com/sharpic/redact/actions/workflows/ci.yml)
 [![Coverage](https://raw.githubusercontent.com/sharpic/redact/main/badges/coverage.svg)](https://github.com/sharpic/redact/actions/workflows/ci.yml)
-[![Security alerts](https://img.shields.io/github/security-advisories/sharpic/redact?label=security%20alerts)](https://github.com/sharpic/redact/security/dependabot)
+[![Dependabot](https://img.shields.io/badge/Dependabot-enabled-2cbe4e?logo=dependabot&logoColor=white)](https://github.com/sharpic/redact/security/dependabot)
 
 A local command-line tool that redacts personally identifiable information (PII) in common document formats. It replaces names, email addresses, ID codes, and usernames with consistent placeholders, and writes a separate mapping file that can restore the originals at any time.
 
