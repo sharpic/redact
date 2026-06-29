@@ -102,6 +102,41 @@ name     = "username"
 regex    = '\b(?=[a-zA-Z0-9]*[a-zA-Z])(?=[a-zA-Z0-9]*\d)[a-zA-Z0-9]{8}\b'
 template = "user{n:04d}xx"
 
+[[patterns]]
+# Broad proper-noun detection — enabled only with -pn / --proper-nouns.
+# With spaCy: catches ORG, GPE, and NORP entities (Google, Microsoft, Oxford, etc.)
+#             in addition to PERSON entities already caught by the name pattern.
+# Without spaCy: catches single or multi-word Title Case sequences as a fallback
+#                (more false positives than spaCy; install spaCy for best results).
+name         = "proper_noun"
+pn_only      = true
+spacy_ner    = true
+spacy_labels = ["PERSON", "ORG", "GPE", "NORP"]
+regex        = '\b[A-Z][a-z]{1,30}(?:\s+[A-Z][a-z]{1,30}){0,3}\b'
+template     = "Entity{n:03d}"
+min_word_length = 2
+exclusions = [
+  # Months and days
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+  "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+  # Articles / demonstratives / common sentence-starters
+  "The", "This", "That", "These", "Those", "However", "Therefore",
+  "Furthermore", "Moreover", "Although", "Nevertheless", "Meanwhile",
+  # Document structure
+  "Section", "Chapter", "Appendix", "Figure", "Table", "Page", "Ref",
+  "Paragraph", "Part", "Item", "Annex", "Schedule", "Exhibit",
+  # Generic heading / status words
+  "True", "False", "None", "Null", "Error", "Warning", "Info",
+  "Introduction", "Conclusion", "Overview", "Background", "Summary",
+  "Results", "Discussion", "References", "Abstract", "Contents",
+  # Calendar / academic terms
+  "Academic", "Calendar", "Semester", "Term", "Week", "Weeks",
+  "Welcome", "Christmas", "Easter", "Summer", "Autumn", "Spring", "Winter",
+  # Short tokens
+  "Re", "Dr", "Mr", "Ms", "Mrs", "Prof",
+]
+
 
 # ── Example: add more patterns below ─────────────────────────────────────────
 #

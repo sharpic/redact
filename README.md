@@ -123,24 +123,37 @@ python3 redact.py report_redacted.docx -r -m /secure/report_mapping.json
 python3 redact.py report.docx --config my_patterns.toml
 ```
 
-### Disable spaCy (faster, regex-only name detection)
+### Also redact person names / proper nouns
+
+Name detection is opt-in because it has the highest false-positive rate. Enable it with `-pn` or `-rn`:
 
 ```bash
-python3 redact.py report.docx --no-spacy
+python3 redact.py report.docx --proper-nouns   # long form
+python3 redact.py report.docx -pn              # short form
+python3 redact.py report.docx -rn              # alias (real names)
+```
+
+Uses spaCy NER when available, falling back to a title-case word heuristic.
+
+### Disable spaCy when redacting names (faster, regex-only)
+
+```bash
+python3 redact.py report.docx -pn --no-spacy
 ```
 
 ### Full option reference
 
 ```
 positional arguments:
-  input               Input file (.docx / .odt / .xlsx / .pdf)
+  input                     Input file (.docx / .odt / .xlsx / .pdf)
 
 options:
-  -o, --output FILE   Output path  (default: <input>_redacted.<ext>)
-  -m, --mapping FILE  Mapping JSON (default: <input>_mapping.json)
-  -c, --config FILE   Config TOML  (default: redact_config.toml)
-  --no-spacy          Use regex heuristic instead of spaCy for names
-  -r, --restore       Reverse mode: restore originals from mapping file
+  -o, --output FILE         Output path (default: <input>_redacted.<ext>)
+  -m, --mapping FILE        Mapping JSON (default: <input>_mapping.json)
+  -c, --config FILE         Config TOML (default: redact_config.toml)
+  -pn, -rn, --proper-nouns  Also redact person names / proper nouns
+  --no-spacy                Use regex heuristic instead of spaCy for names
+  -r, --restore             Reverse mode: restore originals from mapping file
 ```
 
 ---

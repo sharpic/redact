@@ -978,6 +978,205 @@ class TestSpacyNER(unittest.TestCase):
         self.assertNotIn('ab12cd34', result)
 
 
+def _pat_proper_noun():
+    return PatternDef(
+        name='proper_noun',
+        template='Entity{n:03d}',
+        regex=re.compile(r'\b[A-Z][a-z]{1,30}(?:\s+[A-Z][a-z]{1,30}){0,3}\b'),
+        exclusions=frozenset({'January', 'Monday', 'The', 'This', 'Section', 'Table',
+                              'True', 'False', 'Introduction', 'However'}),
+        min_word_length=2,
+        pn_only=True,
+    )
+
+
+# ── --proper-nouns flag behaviour ─────────────────────────────────────────────
+
+class TestProperNounsFlag(unittest.TestCase):
+    """Names always redacted; -pn adds broader org/place/single-name detection."""
+
+    def test_two_word_names_redacted_without_flag(self):
+        result, _ = _redact('Alice Johnson emailed user@example.com')
+        self.assertNotIn('Alice Johnson', result)
+        self.assertIn('Person', result)
+
+    def test_email_always_redacted(self):
+        result, _ = _redact('contact user@example.com')
+        self.assertNotIn('user@example.com', result)
+
+    def test_id_always_redacted(self):
+        result, _ = _redact('ID 1234567')
+        self.assertNotIn('1234567', result)
+
+    def test_pn_flag_adds_single_word_detection(self):
+        # Without flag: single capitalised word not caught by 2-word name heuristic
+        without = [_pat_email(), _pat_name(), _pat_id(), _pat_username()]
+        result_without, _ = _redact('Contact Alice at reception', patterns=without)
+        # name heuristic needs 2 words so standalone "Alice" may not be caught
+        # With flag: proper_noun pattern also active
+        with_pn = without + [_pat_proper_noun()]
+        result_with, _ = _redact('Contact Alice at reception', patterns=with_pn)
+        # proper_noun regex matches single Title Case words
+        self.assertNotIn('Alice', result_with)
+
+    def test_pn_flag_adds_org_detection(self):
+        # "Google" is not caught by name pattern (not a PERSON entity in NER context;
+        # regex needs 2 words). proper_noun catches it.
+        with_pn = _all_patterns() + [_pat_proper_noun()]
+        result, _ = _redact('Signed a contract with Google last year', patterns=with_pn)
+        self.assertNotIn('Google', result)
+        self.assertIn('Entity', result)
+
+    def test_pn_only_patterns_excluded_without_flag(self):
+        pat = _pat_proper_noun()
+        self.assertTrue(pat.pn_only)
+        # Simulate filtering (as cmd_redact does without -pn)
+        patterns = [p for p in _all_patterns() + [pat] if not p.pn_only]
+        self.assertNotIn('proper_noun', [p.name for p in patterns])
+
+
+# ── _build_component_map ──────────────────────────────────────────────────────
+
+class TestBuildComponentWords(unittest.TestCase):
+    """_build_component_words returns the set of unambiguous name fragment words."""
+
+    def setUp(self):
+        self.pat = _pat_name()
+        self.reg = PseudonymRegistry()
+
+    def _prescan(self, text):
+        redact_text(text, self.reg, [self.pat], nlp=None)
+
+    def test_both_words_in_set_for_unique_name(self):
+        from redact import _build_component_words
+        self._prescan('Alice Johnson')
+        words = _build_component_words(self.reg, [self.pat])
+        self.assertIn('Alice', words)
+        self.assertIn('Johnson', words)
+
+    def test_ambiguous_first_name_excluded(self):
+        from redact import _build_component_words
+        self._prescan('Alice Johnson')
+        self._prescan('Alice Brown')
+        words = _build_component_words(self.reg, [self.pat])
+        self.assertNotIn('Alice', words)   # appears in two names → ambiguous
+        self.assertIn('Johnson', words)
+        self.assertIn('Brown', words)
+
+    def test_single_word_entry_not_a_source(self):
+        from redact import _build_component_words
+        # Single-word registry entries have no space, so they are not sources
+        self.reg._map[('name', 'Alice')] = 'Person001'
+        words = _build_component_words(self.reg, [self.pat])
+        self.assertEqual(words, set())
+
+
+# ── _find_name_column_triples ──────────────────────────────────────────────────
+
+class TestFindNameColumnTriples(unittest.TestCase):
+
+    def test_first_and_last_detected(self):
+        from redact import _find_name_column_triples
+        triples = _find_name_column_triples(['ID', 'First Name', 'Last Name', 'Email'])
+        self.assertEqual(triples, [(1, None, 2)])
+
+    def test_with_middle_name(self):
+        from redact import _find_name_column_triples
+        triples = _find_name_column_triples(['First Name', 'Middle Name', 'Last Name'])
+        self.assertEqual(triples, [(0, 1, 2)])
+
+    def test_no_name_columns(self):
+        from redact import _find_name_column_triples
+        self.assertEqual(_find_name_column_triples(['ID', 'Email', 'Score']), [])
+
+    def test_surname_alias(self):
+        from redact import _find_name_column_triples
+        triples = _find_name_column_triples(['Forename', 'Surname'])
+        self.assertEqual(triples, [(0, None, 1)])
+
+
+# ── Excel cross-cell name linking (-mcn) ──────────────────────────────────────
+
+class TestMultiColNames(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import openpyxl
+            cls.openpyxl = openpyxl
+        except ImportError:
+            cls.openpyxl = None
+
+    def setUp(self):
+        if self.openpyxl is None:
+            self.skipTest('openpyxl not installed')
+
+    def _make_split_wb(self, path):
+        wb = self.openpyxl.Workbook()
+        ws = wb.active
+        ws.append(['First Name', 'Last Name', 'Email'])
+        ws.append(['Alice', 'Johnson', 'alice.johnson@uni.ac.uk'])
+        ws.append(['Bob',   'Smith',   'b.smith@uni.ac.uk'])
+        wb.save(str(path))
+
+    def test_without_mcn_names_get_separate_pseudonyms(self):
+        from redact import process_xlsx
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'src.xlsx'
+            out = Path(d) / 'out.xlsx'
+            self._make_split_wb(src)
+
+            registry = PseudonymRegistry()
+            process_xlsx(src, out,
+                         lambda t: redact_text(t, registry, [_pat_name()], nlp=None))
+
+            wb = self.openpyxl.load_workbook(str(out))
+            row2 = [c.value for c in list(wb.active.iter_rows())[1]]
+            first, last = row2[0], row2[1]
+            # Without -mcn: each cell processed independently → may differ
+            # (just verify both were processed — the exact pseudonyms may vary)
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(last)
+
+    def test_with_mcn_each_cell_redacted_and_restorable(self):
+        """With -mcn, split-column name fragments each get their own pseudonym so
+        de-redaction restores every cell back to its original value."""
+        from redact import process_xlsx, restore_text
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'src.xlsx'
+            out = Path(d) / 'out.xlsx'
+            self._make_split_wb(src)
+
+            registry = PseudonymRegistry()
+            pats = [_pat_name()]
+            prescan = lambda t: redact_text(t, registry, pats, nlp=None)
+            process_xlsx(src, out,
+                         lambda t: redact_text(t, registry, pats, nlp=None),
+                         prescan_fn=prescan, registry=registry, patterns=pats)
+
+            wb = self.openpyxl.load_workbook(str(out))
+            rows = list(wb.active.iter_rows(values_only=True))
+            first_alice, last_johnson = rows[1][0], rows[1][1]
+            first_bob, last_smith = rows[2][0], rows[2][1]
+
+            # Both cells must be redacted
+            self.assertIn('Person', str(first_alice))
+            self.assertIn('Person', str(last_johnson))
+            self.assertIn('Person', str(first_bob))
+            self.assertIn('Person', str(last_smith))
+
+            # Each cell gets its own pseudonym (de-redaction works per cell)
+            self.assertNotEqual(first_alice, last_johnson)
+            self.assertNotEqual(first_bob, last_smith)
+
+            # De-redaction restores each cell to its own original value
+            mapping = registry.mapping_file_dict()
+            self.assertEqual(mapping.get(first_alice), 'Alice')
+            self.assertEqual(mapping.get(last_johnson), 'Johnson')
+            self.assertEqual(mapping.get(first_bob), 'Bob')
+            self.assertEqual(mapping.get(last_smith), 'Smith')
+
+
 # ── entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':

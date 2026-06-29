@@ -70,6 +70,7 @@ class PatternDef:
     spacy_labels: list = field(default_factory=lambda: ['PERSON'])
     exclusions: frozenset = frozenset()
     min_word_length: int = 1
+    pn_only: bool = False
 
 
 def build_patterns(config: dict) -> list[PatternDef]:
@@ -94,6 +95,7 @@ def build_patterns(config: dict) -> list[PatternDef]:
             spacy_labels=p.get('spacy_labels', ['PERSON']),
             exclusions=frozenset(p.get('exclusions', [])),
             min_word_length=p.get('min_word_length', 1),
+            pn_only=p.get('pn_only', False),
         ))
     return patterns
 
@@ -268,20 +270,111 @@ def process_odt(input_path: Path, output_path: Path, transform_fn):
     doc.save(str(output_path))
 
 
-def process_xlsx(input_path: Path, output_path: Path, transform_fn):
+def _build_component_words(registry: 'PseudonymRegistry', patterns: list) -> set:
+    """Return the set of single words that unambiguously identify one registered name.
+
+    Used by process_xlsx (-mcn) to detect name fragments in individual cells so they
+    get their own pseudonym even when the pattern regex or NER wouldn't catch them alone.
+    A word is included only if it appears in exactly one registered multi-word name —
+    words shared across multiple names (common first names, etc.) are excluded.
+    Each detected fragment gets a fresh pseudonym via get_or_create, so de-redaction
+    maps every cell back to its own original value with no collisions.
+    """
+    pat_names = {p.name for p in patterns if p.spacy_ner or p.name in ('name', 'proper_noun')}
+    entries = [
+        orig
+        for (pname, orig) in registry._map
+        if pname in pat_names and ' ' in orig
+    ]
+    component_words: set = set()
+    for orig in entries:
+        for word in orig.split():
+            if len(word) >= 2:
+                word_re = re.compile(r'(?<!\w)' + re.escape(word) + r'(?!\w)')
+                if sum(1 for o in entries if word_re.search(o)) == 1:
+                    component_words.add(word)
+    return component_words
+
+
+_FIRST_NAME_HEADERS = frozenset({
+    'first name', 'firstname', 'forename', 'given name', 'christian name', 'first',
+})
+_LAST_NAME_HEADERS = frozenset({
+    'last name', 'lastname', 'surname', 'family name', 'second name', 'last',
+})
+_MIDDLE_NAME_HEADERS = frozenset({
+    'middle name', 'middle', 'middle initial',
+})
+
+
+def _find_name_column_triples(headers: list) -> list[tuple]:
+    """Return (first_idx, middle_idx_or_None, last_idx) for detected name column groups."""
+    norm = [str(h).lower().strip() if h else '' for h in headers]
+    firsts  = [i for i, h in enumerate(norm) if h in _FIRST_NAME_HEADERS]
+    lasts   = [i for i, h in enumerate(norm) if h in _LAST_NAME_HEADERS]
+    middles = [i for i, h in enumerate(norm) if h in _MIDDLE_NAME_HEADERS]
+    triples = []
+    for fi, li in zip(firsts, lasts):
+        mid = next((m for m in middles if fi < m < li), None)
+        triples.append((fi, mid, li))
+    return triples
+
+
+def process_xlsx(input_path: Path, output_path: Path, transform_fn,
+                 prescan_fn=None, registry=None, patterns=None):
     """Apply transform_fn to every string cell across all sheets and save the result.
     Numeric and formula cells are left untouched.
+
+    When prescan_fn + registry + patterns are provided (-mcn mode):
+      1. Row-combination pre-scan: join all string cells per row so NER sees full names.
+      2. Header-aware pre-scan: combine First Name / Last Name column pairs explicitly.
+      3. Component words: after pre-scanning, identify unambiguous name fragments and
+         assign each its own fresh pseudonym via get_or_create — so every cell has a
+         unique mapping entry and de-redaction restores each cell to its own original.
     """
     import openpyxl
     wb = openpyxl.load_workbook(str(input_path))
 
     for ws in wb.worksheets:
-        for row in ws.iter_rows():
+        rows = list(ws.iter_rows())
+        if not rows:
+            continue
+
+        component_words: set = set()
+        name_pat = None
+
+        if prescan_fn is not None and len(rows) > 1:
+            headers = [cell.value for cell in rows[0]]
+            name_triples = _find_name_column_triples(headers)
+
+            for row in rows[1:]:
+                # Row-combination: combine all string cells so NER sees full names
+                str_vals = [c.value for c in row if isinstance(c.value, str) and c.value.strip()]
+                if str_vals:
+                    prescan_fn(' '.join(str_vals))
+
+                # Header-aware: explicitly combine known name columns in the right order
+                for fi, mi, li in name_triples:
+                    indices = [fi, mi, li] if mi is not None else [fi, li]
+                    parts = [row[i].value for i in indices
+                             if i < len(row) and isinstance(row[i].value, str) and row[i].value.strip()]
+                    if len(parts) >= 2:
+                        prescan_fn(' '.join(parts))
+
+            if registry is not None and patterns is not None:
+                component_words = _build_component_words(registry, patterns)
+                name_pat = next((p for p in patterns if p.name == 'name'), None)
+
+        for row in rows:
             for cell in row:
                 if isinstance(cell.value, str):
-                    transformed = transform_fn(cell.value)
-                    if transformed != cell.value:
-                        cell.value = transformed
+                    result = transform_fn(cell.value)
+                    # Fallback: if the main transform didn't change this cell and the
+                    # word is an unambiguous name fragment, mint a fresh pseudonym for it
+                    if result == cell.value and name_pat and cell.value.strip() in component_words:
+                        result = registry.get_or_create(cell.value.strip(), name_pat)
+                    if result != cell.value:
+                        cell.value = result
 
     wb.save(str(output_path))
 
@@ -335,6 +428,10 @@ def cmd_redact(args):
     if not patterns:
         sys.exit('Error: no [[patterns]] defined in config file.')
 
+    # pn_only patterns (broader proper-noun detection) require -pn / --proper-nouns
+    if not args.proper_nouns:
+        patterns = [p for p in patterns if not p.pn_only]
+
     # Load spaCy if any pattern requests it
     nlp = None
     needs_ner = any(p.spacy_ner for p in patterns)
@@ -356,7 +453,12 @@ def cmd_redact(args):
 
     print(f'Redacting:   {input_path}')
     try:
-        handler(input_path, output_path, transform)
+        if suffix == '.xlsx' and args.multi_col_names:
+            prescan = lambda text: redact_text(text, registry, patterns, nlp)
+            process_xlsx(input_path, output_path, transform,
+                         prescan_fn=prescan, registry=registry, patterns=patterns)
+        else:
+            handler(input_path, output_path, transform)
     except ImportError as exc:
         sys.exit(f'Missing library — run: pip install {lib}\n  ({exc})')
 
@@ -456,14 +558,26 @@ examples:
   # Use a custom pattern config instead of the default
   python3 redact.py report.docx --config my_patterns.toml
 
-  # Disable spaCy NER (faster, uses regex heuristic for names instead)
-  python3 redact.py report.docx --no-spacy
+  # Also redact person names / proper nouns
+  python3 redact.py report.docx --proper-nouns
+  python3 redact.py report.docx -pn          # short form
+  python3 redact.py report.docx -rn          # alias (real names)
 
-detected PII  (default config — edit redact_config.toml to extend):
+  # Excel: link names split across columns (First Name + Last Name → same pseudonym)
+  python3 redact.py data.xlsx --multi-col-names
+  python3 redact.py data.xlsx -mcn           # short form
+
+  # Disable spaCy NER when using --proper-nouns (uses regex heuristic instead)
+  python3 redact.py report.docx -pn --no-spacy
+
+detected PII  (default — edit redact_config.toml to extend):
   email      user@domain.tld              → person001@anon.invalid
-  name       Alice Smith                  → Person001  (spaCy NER or title-case heuristic)
+  name       Alice Smith / Alice Johnson  → Person001  (spaCy NER or 2-word heuristic)
   id         1234567  /  12345678         → 0000001  /  00000001  (same digit count)
   username   ab12cd34  (8-char mixed)     → user0001xx
+
+with -pn / --proper-nouns (adds broad proper-noun detection):
+  org/place  Google / Microsoft / Oxford  → Entity001  (spaCy ORG/GPE or Title Case word)
 
 output files:
   <stem>_redacted.<ext>   redacted copy of the document
@@ -501,8 +615,17 @@ def main():
     parser.add_argument('--config', '-c', metavar='FILE',
                         default=str(DEFAULT_CONFIG),
                         help=f'Config TOML path (default: {DEFAULT_CONFIG.name} next to script)')
+    parser.add_argument('--proper-nouns', '--real-names', '-pn', '-rn',
+                        dest='proper_nouns', action='store_true',
+                        help='Also redact proper nouns and person names (uses spaCy NER when available)')
+    parser.add_argument('--multi-col-names', '-mcn', dest='multi_col_names',
+                        action='store_true',
+                        help='Excel only: pre-scan rows to link names split across columns '
+                             '(e.g. "Alice" in one cell, "Johnson" in another → same pseudonym). '
+                             'Uses both row-combination and header-aware detection '
+                             '(First Name / Last Name column headers).')
     parser.add_argument('--no-spacy', action='store_true',
-                        help='Disable spaCy NER (faster; uses regex heuristic for names)')
+                        help='Disable spaCy NER when using --proper-nouns (uses regex heuristic instead)')
     parser.add_argument('--restore', '-r', action='store_true',
                         help='Reverse: restore originals from mapping file')
 
