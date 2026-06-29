@@ -30,10 +30,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install python-docx odfpy openpyxl pdfplumber
-          pip install spacy
+          pip install python-docx odfpy openpyxl pdfplumber \
+                      spacy click \
+                      pytest pytest-cov coverage-badge radon
           python -m spacy download en_core_web_sm
-          pip install pytest pytest-cov coverage-badge radon click
 
       - name: Run tests
         run: |
