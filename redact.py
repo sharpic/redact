@@ -320,6 +320,41 @@ def _find_name_column_triples(headers: list) -> list[tuple]:
     return triples
 
 
+def _xlsx_prescan_sheet(rows, prescan_fn):
+    """Pre-scan all data rows so NER sees full names before any cell is redacted."""
+    name_triples = _find_name_column_triples([cell.value for cell in rows[0]])
+    for row in rows[1:]:
+        str_vals = [c.value for c in row if isinstance(c.value, str) and c.value.strip()]
+        if str_vals:
+            prescan_fn(' '.join(str_vals))
+        for fi, mi, li in name_triples:
+            indices = [fi, mi, li] if mi is not None else [fi, li]
+            parts = [row[i].value for i in indices
+                     if i < len(row) and isinstance(row[i].value, str) and row[i].value.strip()]
+            if len(parts) >= 2:
+                prescan_fn(' '.join(parts))
+
+
+def _xlsx_component_info(registry, patterns):
+    """Return (component_words, name_pat) for the post-prescan fallback step."""
+    if not registry or not patterns:
+        return set(), None
+    return _build_component_words(registry, patterns), next(
+        (p for p in patterns if p.name == 'name'), None
+    )
+
+
+def _xlsx_transform_cell(cell, transform_fn, registry, name_pat, component_words):
+    """Apply transform_fn to one string cell, with component-word fallback."""
+    if not isinstance(cell.value, str):
+        return
+    result = transform_fn(cell.value)
+    if result == cell.value and name_pat and cell.value.strip() in component_words:
+        result = registry.get_or_create(cell.value.strip(), name_pat)
+    if result != cell.value:
+        cell.value = result
+
+
 def process_xlsx(input_path: Path, output_path: Path, transform_fn,
                  prescan_fn=None, registry=None, patterns=None):
     """Apply transform_fn to every string cell across all sheets and save the result.
@@ -340,41 +375,14 @@ def process_xlsx(input_path: Path, output_path: Path, transform_fn,
         if not rows:
             continue
 
-        component_words: set = set()
-        name_pat = None
-
+        component_words, name_pat = set(), None
         if prescan_fn is not None and len(rows) > 1:
-            headers = [cell.value for cell in rows[0]]
-            name_triples = _find_name_column_triples(headers)
-
-            for row in rows[1:]:
-                # Row-combination: combine all string cells so NER sees full names
-                str_vals = [c.value for c in row if isinstance(c.value, str) and c.value.strip()]
-                if str_vals:
-                    prescan_fn(' '.join(str_vals))
-
-                # Header-aware: explicitly combine known name columns in the right order
-                for fi, mi, li in name_triples:
-                    indices = [fi, mi, li] if mi is not None else [fi, li]
-                    parts = [row[i].value for i in indices
-                             if i < len(row) and isinstance(row[i].value, str) and row[i].value.strip()]
-                    if len(parts) >= 2:
-                        prescan_fn(' '.join(parts))
-
-            if registry is not None and patterns is not None:
-                component_words = _build_component_words(registry, patterns)
-                name_pat = next((p for p in patterns if p.name == 'name'), None)
+            _xlsx_prescan_sheet(rows, prescan_fn)
+            component_words, name_pat = _xlsx_component_info(registry, patterns)
 
         for row in rows:
             for cell in row:
-                if isinstance(cell.value, str):
-                    result = transform_fn(cell.value)
-                    # Fallback: if the main transform didn't change this cell and the
-                    # word is an unambiguous name fragment, mint a fresh pseudonym for it
-                    if result == cell.value and name_pat and cell.value.strip() in component_words:
-                        result = registry.get_or_create(cell.value.strip(), name_pat)
-                    if result != cell.value:
-                        cell.value = result
+                _xlsx_transform_cell(cell, transform_fn, registry, name_pat, component_words)
 
     wb.save(str(output_path))
 
@@ -408,6 +416,63 @@ _RESTORE_SUFFIX = {'.docx': '.docx', '.odt': '.odt', '.xlsx': '.xlsx', '.txt': '
 
 # ── Commands ───────────────────────────────────────────────────────────────────
 
+def _resolve_redact_paths(args, out_suffix):
+    """Return (output_path, mapping_path) from args, applying default naming."""
+    input_path = Path(args.input)
+    output_path = (Path(args.output) if args.output
+                   else input_path.with_name(input_path.stem + '_redacted' + out_suffix))
+    mapping_path = (Path(args.mapping) if args.mapping
+                    else input_path.with_name(input_path.stem + '_mapping.json'))
+    return output_path, mapping_path
+
+
+def _load_nlp(config, patterns, no_spacy):
+    """Load spaCy model if any pattern needs NER; return nlp or None."""
+    if not any(p.spacy_ner for p in patterns) or no_spacy:
+        return None
+    model = config.get('settings', {}).get('spacy_model', 'en_core_web_sm')
+    try:
+        import spacy
+        nlp = spacy.load(model)
+        print(f'[info] spaCy NER active ({model}).')
+        return nlp
+    except ImportError:
+        print('[info] spaCy not installed — using regex heuristic for names.')
+        print('       pip install spacy && python -m spacy download', model)
+    except OSError:
+        print(f'[info] spaCy model "{model}" not found — using regex heuristic.')
+        print('       python -m spacy download', model)
+    return None
+
+
+def _save_mapping(mapping_path, input_path, output_path, registry, nlp):
+    """Write the pseudonym mapping JSON file."""
+    mapping_doc = {
+        'source_file': str(input_path.resolve()),
+        'redacted_file': str(output_path.resolve()),
+        'created': datetime.now().isoformat(timespec='seconds'),
+        'spacy_ner_used': nlp is not None,
+        'stats': registry.stats(),
+        'mapping': registry.mapping_file_dict(),
+    }
+    mapping_path.write_text(
+        json.dumps(mapping_doc, indent=2, ensure_ascii=False), encoding='utf-8'
+    )
+
+
+def _print_redact_stats(registry, nlp):
+    """Print a summary of what was replaced."""
+    stats = registry.stats()
+    total = sum(stats.values())
+    if total:
+        print(f'Replaced:    {total} items — ' +
+              ', '.join(f'{v} {k}(s)' for k, v in stats.items()))
+    else:
+        print('[note] No PII detected.')
+        if not nlp:
+            print('       Install spaCy for better name detection.')
+
+
 def cmd_redact(args):
     input_path = Path(args.input)
     if not input_path.exists():
@@ -418,36 +483,16 @@ def cmd_redact(args):
         sys.exit(f"Error: unsupported type '{suffix}'. Supported: {', '.join(_HANDLERS)}")
 
     handler, out_suffix, lib = _HANDLERS[suffix]
-    output_path = (Path(args.output) if args.output
-                   else input_path.with_name(input_path.stem + '_redacted' + out_suffix))
-    mapping_path = (Path(args.mapping) if args.mapping
-                    else input_path.with_name(input_path.stem + '_mapping.json'))
+    output_path, mapping_path = _resolve_redact_paths(args, out_suffix)
 
     config = load_config(Path(args.config))
     patterns = build_patterns(config)
     if not patterns:
         sys.exit('Error: no [[patterns]] defined in config file.')
-
-    # pn_only patterns (broader proper-noun detection) require -pn / --proper-nouns
     if not args.proper_nouns:
         patterns = [p for p in patterns if not p.pn_only]
 
-    # Load spaCy if any pattern requests it
-    nlp = None
-    needs_ner = any(p.spacy_ner for p in patterns)
-    if needs_ner and not args.no_spacy:
-        model = config.get('settings', {}).get('spacy_model', 'en_core_web_sm')
-        try:
-            import spacy
-            nlp = spacy.load(model)
-            print(f'[info] spaCy NER active ({model}).')
-        except ImportError:
-            print('[info] spaCy not installed — using regex heuristic for names.')
-            print('       pip install spacy && python -m spacy download', model)
-        except OSError:
-            print(f'[info] spaCy model "{model}" not found — using regex heuristic.')
-            print('       python -m spacy download', model)
-
+    nlp = _load_nlp(config, patterns, args.no_spacy)
     registry = PseudonymRegistry()
     transform = lambda text: redact_text(text, registry, patterns, nlp)
 
@@ -462,29 +507,10 @@ def cmd_redact(args):
     except ImportError as exc:
         sys.exit(f'Missing library — run: pip install {lib}\n  ({exc})')
 
-    mapping_doc = {
-        'source_file': str(input_path.resolve()),
-        'redacted_file': str(output_path.resolve()),
-        'created': datetime.now().isoformat(timespec='seconds'),
-        'spacy_ner_used': nlp is not None,
-        'stats': registry.stats(),
-        'mapping': registry.mapping_file_dict(),
-    }
-    mapping_path.write_text(
-        json.dumps(mapping_doc, indent=2, ensure_ascii=False), encoding='utf-8'
-    )
-
-    stats = registry.stats()
-    total = sum(stats.values())
+    _save_mapping(mapping_path, input_path, output_path, registry, nlp)
     print(f'Output:      {output_path}')
     print(f'Mapping:     {mapping_path}')
-    if total:
-        print(f'Replaced:    {total} items — ' +
-              ', '.join(f'{v} {k}(s)' for k, v in stats.items()))
-    else:
-        print('[note] No PII detected.')
-        if not nlp:
-            print('       Install spaCy for better name detection.')
+    _print_redact_stats(registry, nlp)
 
 
 def cmd_restore(args):
