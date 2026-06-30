@@ -81,6 +81,5 @@ jobs:
           git add badges/coverage.svg
           if ! git diff --cached --exit-code; then
             git commit -m "chore: update coverage badge [skip ci]"
-            git remote set-url origin https://x-access-token:${{ secrets.BADGE_PUSH_TOKEN }}@github.com/${{ github.repository }}.git
             git push origin HEAD:main
           fi
