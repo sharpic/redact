@@ -79,3 +79,4 @@ jobs:
         with:
           commit_message: 'chore: update coverage badge [skip ci]'
           file_pattern: badges/coverage.svg
+          token: ${{ secrets.BADGE_PUSH_TOKEN }}
