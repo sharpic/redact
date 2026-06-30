@@ -637,5 +637,5 @@ def main():
         cmd_redact(args)
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # pragma: no cover
     main()

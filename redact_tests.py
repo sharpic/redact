@@ -6,11 +6,14 @@ Run all:   python3 -m pytest redact_tests.py -v
 Run fast:  python3 -m pytest redact_tests.py -v -m "not slow"
 """
 
+import json
 import re
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -18,9 +21,14 @@ from redact import (
     _apply_template,
     _overlaps,
     _passes_exclusions,
+    _process_docx_para,
     PseudonymRegistry,
     PatternDef,
     build_patterns,
+    cmd_redact,
+    cmd_restore,
+    main,
+    process_pdf,
     redact_text,
     restore_text,
     load_config,
@@ -1175,6 +1183,454 @@ class TestMultiColNames(unittest.TestCase):
             self.assertEqual(mapping.get(last_johnson), 'Johnson')
             self.assertEqual(mapping.get(first_bob), 'Bob')
             self.assertEqual(mapping.get(last_smith), 'Smith')
+
+
+# ── spaCy NER code-path (lines 177-180 in redact_text) ────────────────────────
+
+@unittest.skipUnless(_SPACY_OK, 'spaCy en_core_web_sm not installed')
+class TestSpacyNERCodePath(unittest.TestCase):
+    """Exercises lines 177-180: spacy_ner=True pattern actually invokes nlp()."""
+
+    @classmethod
+    def setUpClass(cls):
+        import spacy
+        cls.nlp = spacy.load('en_core_web_sm')
+
+    def test_person_entity_redacted_via_ner(self):
+        pat = PatternDef(name='name', template='Person{n:03d}',
+                         spacy_ner=True, spacy_labels=['PERSON'])
+        registry = PseudonymRegistry()
+        result = redact_text('The report was written by Alice Johnson.',
+                              registry, [pat], nlp=self.nlp)
+        self.assertNotIn('Alice Johnson', result)
+        self.assertIn('Person', result)
+
+    def test_wrong_label_entity_not_redacted(self):
+        """Line 179: entity label not in spacy_labels → _add not called."""
+        pat = PatternDef(name='name', template='Person{n:03d}',
+                         spacy_ner=True, spacy_labels=['PERSON'])
+        registry = PseudonymRegistry()
+        # "London" is typically GPE, not PERSON — must survive unredacted
+        result = redact_text('Alice Johnson visited London.',
+                              registry, [pat], nlp=self.nlp)
+        self.assertNotIn('Alice Johnson', result)
+        self.assertIn('London', result)
+
+    def test_excluded_entity_not_redacted(self):
+        """Line 179: _passes_exclusions returns False → entity not added."""
+        pat = PatternDef(name='name', template='Person{n:03d}',
+                         spacy_ner=True, spacy_labels=['PERSON'],
+                         exclusions=frozenset({'Alice', 'Johnson'}))
+        registry = PseudonymRegistry()
+        result = redact_text('Alice Johnson submitted this.',
+                              registry, [pat], nlp=self.nlp)
+        self.assertIn('Alice Johnson', result)
+
+
+# ── _process_docx_para multiple-run clearing (line 229) ───────────────────────
+
+class TestProcessDocxParaMultipleRuns(unittest.TestCase):
+    def setUp(self):
+        try:
+            from docx import Document  # noqa: F401
+        except ImportError:
+            self.skipTest('python-docx not installed')
+
+    def test_extra_runs_cleared_after_transform(self):
+        """Line 229: runs[1:] text set to '' when paragraph is changed."""
+        from docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'multi_run.docx'
+            doc = Document()
+            para = doc.add_paragraph()
+            para.add_run('John ')
+            para.add_run('Smith')
+            doc.save(str(src))
+            doc2 = Document(str(src))
+            para2 = doc2.paragraphs[0]
+            registry = PseudonymRegistry()
+            _process_docx_para(
+                para2,
+                lambda t: redact_text(t, registry, [_pat_name()], nlp=None)
+            )
+            self.assertEqual(para2.runs[1].text, '')
+
+    def test_unchanged_text_leaves_runs_intact(self):
+        from docx import Document
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'multi_run.docx'
+            doc = Document()
+            para = doc.add_paragraph()
+            para.add_run('no pii ')
+            para.add_run('here')
+            doc.save(str(src))
+            doc2 = Document(str(src))
+            para2 = doc2.paragraphs[0]
+            _process_docx_para(para2, lambda t: t)
+            self.assertEqual(para2.runs[0].text, 'no pii ')
+            self.assertEqual(para2.runs[1].text, 'here')
+
+
+# ── process_xlsx empty-worksheet branch (line 341) ────────────────────────────
+
+class TestProcessXlsxEmptySheet(unittest.TestCase):
+    def setUp(self):
+        try:
+            import openpyxl
+            self.openpyxl = openpyxl
+        except ImportError:
+            self.skipTest('openpyxl not installed')
+
+    def test_empty_sheet_skipped_without_error(self):
+        from redact import process_xlsx
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'src.xlsx'
+            out = Path(d) / 'out.xlsx'
+            wb = self.openpyxl.Workbook()
+            wb.active['A1'] = 'user@example.com'
+            wb.create_sheet('EmptySheet')  # no rows → triggers line 341 continue
+            wb.save(str(src))
+            registry = PseudonymRegistry()
+            process_xlsx(src, out,
+                         lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
+            wb2 = self.openpyxl.load_workbook(str(out))
+            self.assertNotIn('user@example.com', str(wb2.active['A1'].value))
+
+
+# ── process_pdf mocked pdfplumber (lines 386-396) ─────────────────────────────
+
+class TestProcessPdfMocked(unittest.TestCase):
+    def setUp(self):
+        try:
+            import pdfplumber  # noqa: F401
+        except ImportError:
+            self.skipTest('pdfplumber not installed')
+
+    def _mock_pdf_cm(self, *page_texts):
+        pages = [MagicMock(extract_text=MagicMock(return_value=t)) for t in page_texts]
+        cm = MagicMock()
+        cm.__enter__ = lambda s: s
+        cm.__exit__ = MagicMock(return_value=False)
+        cm.pages = pages
+        return cm
+
+    def test_email_redacted_in_output(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'out.txt'
+            registry = PseudonymRegistry()
+            with patch('pdfplumber.open', return_value=self._mock_pdf_cm(
+                'Contact user@example.com for info.'
+            )):
+                process_pdf(Path('fake.pdf'), out,
+                             lambda t: redact_text(t, registry, _all_patterns(), nlp=None))
+            text = out.read_text(encoding='utf-8')
+            self.assertNotIn('user@example.com', text)
+            self.assertIn('@anon.invalid', text)
+            self.assertIn('--- Page 1 ---', text)
+
+    def test_empty_page_handled(self):
+        """extract_text() returning None uses '' fallback."""
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'out.txt'
+            with patch('pdfplumber.open', return_value=self._mock_pdf_cm(None)):
+                process_pdf(Path('fake.pdf'), out, lambda t: t)
+            self.assertIn('--- Page 1 ---', out.read_text(encoding='utf-8'))
+
+    def test_multi_page_output(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'out.txt'
+            with patch('pdfplumber.open',
+                       return_value=self._mock_pdf_cm('First page', 'Second page')):
+                process_pdf(Path('fake.pdf'), out, lambda t: t)
+            text = out.read_text(encoding='utf-8')
+            self.assertIn('--- Page 1 ---', text)
+            self.assertIn('--- Page 2 ---', text)
+
+
+# ── cmd_redact (lines 412-487) ────────────────────────────────────────────────
+
+def _redact_args(input_path, **kw):
+    return Namespace(
+        input=str(input_path),
+        output=kw.get('output'),
+        mapping=kw.get('mapping'),
+        config=kw.get('config', str(DEFAULT_CONFIG)),
+        proper_nouns=kw.get('proper_nouns', False),
+        multi_col_names=kw.get('multi_col_names', False),
+        no_spacy=kw.get('no_spacy', True),
+        restore=False,
+    )
+
+
+class TestCmdRedact(unittest.TestCase):
+    def test_missing_input_exits(self):
+        with self.assertRaises(SystemExit):
+            cmd_redact(_redact_args('/no/such/file.docx'))
+
+    def test_unsupported_extension_exits(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'data.csv'
+            p.write_text('col1,col2')
+            with self.assertRaises(SystemExit):
+                cmd_redact(_redact_args(p))
+
+    def test_empty_config_exits(self):
+        """Lines 428-429: no [[patterns]] → sys.exit."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test.docx'
+            cfg = Path(d) / 'empty.toml'
+            cfg.write_text('')
+            _make_docx(src, paragraphs=['text'])
+            with self.assertRaises(SystemExit):
+                cmd_redact(_redact_args(src, config=str(cfg)))
+
+    def test_redact_docx_creates_output_and_mapping(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'report.docx'
+            out = Path(d) / 'out.docx'
+            mp  = Path(d) / 'map.json'
+            _make_docx(src, paragraphs=['Contact user@example.com ID 1234567'])
+            cmd_redact(_redact_args(src, output=str(out), mapping=str(mp)))
+            self.assertTrue(out.exists())
+            doc = json.loads(mp.read_text(encoding='utf-8'))
+            self.assertIn('mapping', doc)
+            self.assertGreater(sum(doc['stats'].values()), 0)
+
+    def test_redact_auto_output_and_mapping_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'report.docx'
+            _make_docx(src, paragraphs=['user@example.com'])
+            cmd_redact(_redact_args(src))
+            self.assertTrue((Path(d) / 'report_redacted.docx').exists())
+            self.assertTrue((Path(d) / 'report_mapping.json').exists())
+
+    def test_proper_nouns_flag(self):
+        """Lines 431-433: pn_only patterns included when proper_nouns=True."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test.docx'
+            _make_docx(src, paragraphs=['Alice Johnson contacted us.'])
+            cmd_redact(_redact_args(src, proper_nouns=True))
+            self.assertTrue((Path(d) / 'test_redacted.docx').exists())
+
+    def test_no_pii_detected_path(self):
+        """Lines 484-487: zero replacements exercises the 'No PII detected' branch."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'clean.docx'
+            mp  = Path(d) / 'clean_mapping.json'
+            _make_docx(src, paragraphs=['Nothing sensitive here.'])
+            cmd_redact(_redact_args(src, mapping=str(mp)))
+            doc = json.loads(mp.read_text(encoding='utf-8'))
+            self.assertEqual(sum(doc['stats'].values()) if doc['stats'] else 0, 0)
+
+    def test_xlsx_redaction(self):
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl not installed')
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'data.xlsx'
+            wb = openpyxl.Workbook()
+            wb.active['A1'] = 'user@example.com'
+            wb.save(str(src))
+            cmd_redact(_redact_args(src))
+            self.assertTrue((Path(d) / 'data_redacted.xlsx').exists())
+
+    def test_xlsx_multi_col_names(self):
+        """Lines 456-459: xlsx + multi_col_names prescan path."""
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest('openpyxl not installed')
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'people.xlsx'
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.append(['First Name', 'Last Name', 'Email'])
+            ws.append(['Alice', 'Johnson', 'alice@example.com'])
+            wb.save(str(src))
+            cmd_redact(_redact_args(src, multi_col_names=True))
+            self.assertTrue((Path(d) / 'people_redacted.xlsx').exists())
+
+    @unittest.skipUnless(_SPACY_OK, 'spaCy en_core_web_sm not installed')
+    def test_spacy_loaded_successfully(self):
+        """Lines 441-443: spaCy model found and loaded."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test.docx'
+            _make_docx(src, paragraphs=['user@example.com'])
+            cmd_redact(_redact_args(src, no_spacy=False))
+
+    def test_spacy_import_error_logged(self):
+        """Lines 444-446: ImportError when spaCy not installed."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test.docx'
+            _make_docx(src, paragraphs=['user@example.com'])
+            with patch.dict('sys.modules', {'spacy': None}):
+                cmd_redact(_redact_args(src, no_spacy=False))
+            self.assertTrue((Path(d) / 'test_redacted.docx').exists())
+
+    @unittest.skipUnless(_SPACY_OK, 'spaCy en_core_web_sm not installed')
+    def test_spacy_model_not_found_logged(self):
+        """Lines 447-449: OSError when spaCy model missing."""
+        import spacy as _spacy
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test.docx'
+            _make_docx(src, paragraphs=['user@example.com'])
+            with patch.object(_spacy, 'load', side_effect=OSError('no model')):
+                cmd_redact(_redact_args(src, no_spacy=False))
+            self.assertTrue((Path(d) / 'test_redacted.docx').exists())
+
+    def test_handler_import_error_exits(self):
+        """Lines 462-463: ImportError raised by handler → sys.exit."""
+        bad_handler = MagicMock(side_effect=ImportError('no lib'))
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test.docx'
+            _make_docx(src, paragraphs=['user@example.com'])
+            with patch.dict('redact._HANDLERS',
+                            {'.docx': (bad_handler, '.docx', 'python-docx')}):
+                with self.assertRaises(SystemExit):
+                    cmd_redact(_redact_args(src))
+
+
+# ── cmd_restore (lines 491-535) ───────────────────────────────────────────────
+
+def _write_mapping(path, entries=None):
+    Path(path).write_text(json.dumps({
+        'mapping': entries if entries is not None
+        else {'person001@anon.invalid': 'user@example.com'},
+    }), encoding='utf-8')
+
+
+class TestCmdRestore(unittest.TestCase):
+    def test_missing_input_exits(self):
+        with self.assertRaises(SystemExit):
+            cmd_restore(Namespace(input='/no/such/file.docx', output=None, mapping=None))
+
+    def test_explicit_mapping_not_found_exits(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test_redacted.docx'
+            _make_docx(src, paragraphs=['text'])
+            with self.assertRaises(SystemExit):
+                cmd_restore(Namespace(input=str(src), output=None,
+                                       mapping=str(Path(d) / 'missing.json')))
+
+    def test_auto_mapping_not_found_exits(self):
+        """Lines 496-504: auto-lookup fails → sys.exit."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test_redacted.docx'
+            _make_docx(src, paragraphs=['text'])
+            with self.assertRaises(SystemExit):
+                cmd_restore(Namespace(input=str(src), output=None, mapping=None))
+
+    def test_empty_mapping_exits(self):
+        """Lines 508-509: mapping with no entries → sys.exit."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test_redacted.docx'
+            _make_docx(src, paragraphs=['text'])
+            mp = Path(d) / 'test_mapping.json'
+            _write_mapping(mp, entries={})
+            with self.assertRaises(SystemExit):
+                cmd_restore(Namespace(input=str(src), output=None, mapping=str(mp)))
+
+    def test_unsupported_suffix_exits(self):
+        """Lines 512-513: file type not restorable → sys.exit."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'data.csv'
+            src.write_text('col1,col2')
+            mp = Path(d) / 'mapping.json'
+            _write_mapping(mp)
+            with self.assertRaises(SystemExit):
+                cmd_restore(Namespace(input=str(src), output=None, mapping=str(mp)))
+
+    def test_restore_docx_with_explicit_paths(self):
+        """Lines 519-535: successful docx restoration."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'report_redacted.docx'
+            _make_docx(src, paragraphs=['person001@anon.invalid'])
+            mp  = Path(d) / 'mapping.json'
+            _write_mapping(mp)
+            out = Path(d) / 'out.docx'
+            cmd_restore(Namespace(input=str(src), output=str(out), mapping=str(mp)))
+            self.assertTrue(out.exists())
+
+    def test_restore_auto_output_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'report_redacted.docx'
+            _make_docx(src, paragraphs=['person001@anon.invalid'])
+            mp  = Path(d) / 'mapping.json'
+            _write_mapping(mp)
+            cmd_restore(Namespace(input=str(src), output=None, mapping=str(mp)))
+            self.assertTrue((Path(d) / 'report_redacted_restored.docx').exists())
+
+    def test_auto_mapping_strips_redacted_suffix(self):
+        """Lines 498-499: stem ending _redacted → stripped for mapping lookup."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'report_redacted.docx'
+            _make_docx(src, paragraphs=['person001@anon.invalid'])
+            mp = Path(d) / 'report_mapping.json'  # stem without _redacted
+            _write_mapping(mp)
+            cmd_restore(Namespace(input=str(src), output=None, mapping=None))
+            self.assertTrue((Path(d) / 'report_redacted_restored.docx').exists())
+
+    def test_auto_mapping_non_redacted_stem(self):
+        """Line 498 false branch: stem not ending with _redacted."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'report.docx'
+            _make_docx(src, paragraphs=['person001@anon.invalid'])
+            mp = Path(d) / 'report_mapping.json'
+            _write_mapping(mp)
+            out = Path(d) / 'out.docx'
+            cmd_restore(Namespace(input=str(src), output=str(out), mapping=None))
+            self.assertTrue(out.exists())
+
+    def test_restore_txt_file(self):
+        """Lines 523-526: .txt suffix goes through write_text branch."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'report.txt'
+            src.write_text('person001@anon.invalid is the contact', encoding='utf-8')
+            mp  = Path(d) / 'mapping.json'
+            _write_mapping(mp)
+            out = Path(d) / 'restored.txt'
+            cmd_restore(Namespace(input=str(src), output=str(out), mapping=str(mp)))
+            self.assertIn('user@example.com', out.read_text(encoding='utf-8'))
+
+    def test_handler_import_error_exits(self):
+        """Lines 530-532: ImportError from handler → sys.exit."""
+        bad_handler = MagicMock(side_effect=ImportError('no lib'))
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'test_redacted.docx'
+            _make_docx(src, paragraphs=['person001@anon.invalid'])
+            mp  = Path(d) / 'mapping.json'
+            _write_mapping(mp)
+            out = Path(d) / 'out.docx'
+            with patch.dict('redact._HANDLERS',
+                            {'.docx': (bad_handler, '.docx', 'python-docx')}):
+                with self.assertRaises(SystemExit):
+                    cmd_restore(Namespace(input=str(src), output=str(out), mapping=str(mp)))
+
+
+# ── main() (lines 601-637) ────────────────────────────────────────────────────
+
+class TestMain(unittest.TestCase):
+    def test_main_dispatches_to_redact(self):
+        """Lines 601-637: main() without --restore → cmd_redact path."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'doc.docx'
+            _make_docx(src, paragraphs=['user@example.com'])
+            with patch('sys.argv', ['redact.py', str(src), '--no-spacy']):
+                main()
+            self.assertTrue((Path(d) / 'doc_redacted.docx').exists())
+
+    def test_main_dispatches_to_restore(self):
+        """Lines 634-635: main() with --restore → cmd_restore path."""
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'doc_redacted.docx'
+            _make_docx(src, paragraphs=['person001@anon.invalid'])
+            mp = Path(d) / 'doc_mapping.json'
+            _write_mapping(mp)
+            with patch('sys.argv', ['redact.py', str(src), '--restore',
+                                     '--mapping', str(mp)]):
+                main()
+            self.assertTrue((Path(d) / 'doc_redacted_restored.docx').exists())
 
 
 # ── entry point ────────────────────────────────────────────────────────────────
